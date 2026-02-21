@@ -100,9 +100,9 @@ fun ChatScreen(
 @Composable
 fun MessageItem(message: Message) {
     val alignment = if (message.role == MessageRole.USER) {
-        Alignment.End
+        Alignment.CenterEnd
     } else {
-        Alignment.Start
+        Alignment.CenterStart
     }
 
     Box(
