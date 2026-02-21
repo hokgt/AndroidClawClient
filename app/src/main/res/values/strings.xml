@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ClawTalk</string>
+    <string name="voice_service_notification_title">ClawTalk Voice Active</string>
+    <string name="voice_service_notification_content">Tap to return to app</string>
+</resources>
