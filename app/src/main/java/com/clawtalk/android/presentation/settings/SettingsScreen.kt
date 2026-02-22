@@ -94,20 +94,6 @@ fun SettingsScreen(
                 }
             )
 
-            // Agent IDs
-            OutlinedTextField(
-                value = uiState.agentIds,
-                onValueChange = viewModel::onAgentIdsChange,
-                label = { Text("Agent IDs") },
-                placeholder = { Text("main, cs-indonesia, assistant (comma-separated)") },
-                modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(
-                    imeAction = ImeAction.Done
-                ),
-                singleLine = true,
-                supportingText = { Text("Comma-separated list of agent IDs") }
-            )
-
             // Test Connection Button
             Button(
                 onClick = viewModel::testConnection,

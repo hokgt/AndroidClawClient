@@ -91,14 +91,49 @@ class OpenAiApiClient @Inject constructor(
         return try {
             val url = gatewayUrl.trimEnd('/')
             val request = Request.Builder()
-                .url("$url/v1/models")
+                .url("$url/v1/pair")
+                .post("{}".toRequestBody("application/json".toMediaType()))
+                .header("Authorization", "Bearer $authToken")
+                .build()
+
+            val response = client.newCall(request).execute()
+            if (response.isSuccessful) {
+                Result.success("Connected successfully!")
+            } else {
+                Result.failure(Exception("HTTP ${response.code}: ${response.message}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    data class AgentInfo(
+        val id: String,
+        val name: String,
+        val status: String
+    )
+
+    data class AgentsResponse(
+        val agents: List<AgentInfo>
+    )
+
+    suspend fun fetchAgents(
+        gatewayUrl: String,
+        authToken: String
+    ): Result<List<AgentInfo>> {
+        return try {
+            val url = gatewayUrl.trimEnd('/')
+            val request = Request.Builder()
+                .url("$url/v1/agents")
                 .header("Authorization", "Bearer $authToken")
                 .get()
                 .build()
 
             val response = client.newCall(request).execute()
             if (response.isSuccessful) {
-                Result.success("Connected successfully!")
+                val body = response.body?.string() ?: "{}"
+                val agentsResponse = gson.fromJson(body, AgentsResponse::class.java)
+                Result.success(agentsResponse.agents)
             } else {
                 Result.failure(Exception("HTTP ${response.code}: ${response.message}"))
             }
