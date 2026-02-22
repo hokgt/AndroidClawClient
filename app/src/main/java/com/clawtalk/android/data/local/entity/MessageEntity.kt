@@ -12,5 +12,14 @@ data class MessageEntity(
     val timestamp: Long,
     val isVoice: Boolean = false,
     val audioUrl: String? = null,
-    val audioDuration: Int = 0
+    val audioDuration: Int = 0,
+    // Reply/quote
+    val replyToId: String? = null,
+    val replyToContent: String? = null,
+    val replyToRole: String? = null,
+    // Media (picture/file)
+    val mediaUrl: String? = null,
+    val mediaType: String? = null,  // "image", "file"
+    val mediaName: String? = null,
+    val mediaSize: Long = 0
 )

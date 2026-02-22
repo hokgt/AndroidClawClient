@@ -21,6 +21,9 @@ interface MessageDao {
     @Query("SELECT * FROM messages WHERE sessionId = :agentId ORDER BY timestamp DESC LIMIT 1")
     suspend fun getLastMessageForAgent(agentId: String): MessageEntity?
 
+    @Query("SELECT * FROM messages WHERE id = :messageId LIMIT 1")
+    suspend fun getMessageById(messageId: String): MessageEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMessage(message: MessageEntity)
 
