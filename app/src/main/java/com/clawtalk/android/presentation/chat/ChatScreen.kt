@@ -2,19 +2,20 @@ package com.clawtalk.android.presentation.chat
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.view.MotionEvent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
@@ -22,12 +23,14 @@ import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -55,11 +58,13 @@ fun ChatScreen(
     val listState = rememberLazyListState()
     val context = LocalContext.current
 
-    var isVoiceMode by remember { mutableStateOf(false) }
     var isHolding by remember { mutableStateOf(false) }
     var dragOffsetY by remember { mutableFloatStateOf(0f) }
     var isCancelZone by remember { mutableStateOf(false) }
     var recordingSeconds by remember { mutableIntStateOf(0) }
+
+    // Input mode: idle (mic centered), left (typing left field), right (typing right field)
+    var inputMode by remember { mutableStateOf(InputMode.IDLE) }
 
     var hasAudioPermission by remember {
         mutableStateOf(
@@ -170,24 +175,23 @@ fun ChatScreen(
                     }
                 }
 
-                // Input bar
+                // New input bar
                 ChatInputBar(
                     value = uiState.inputText,
                     onValueChange = viewModel::onInputTextChange,
-                    onSend = { viewModel.sendMessage() },
+                    onSend = {
+                        viewModel.sendMessage()
+                        inputMode = InputMode.IDLE
+                    },
                     isLoading = uiState.isLoading,
-                    isVoiceMode = isVoiceMode,
-                    onToggleVoiceMode = {
+                    isHolding = isHolding,
+                    isCancelZone = isCancelZone,
+                    inputMode = inputMode,
+                    onInputModeChange = { inputMode = it },
+                    onHoldStart = {
                         if (!hasAudioPermission) {
                             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                         } else {
-                            isVoiceMode = !isVoiceMode
-                        }
-                    },
-                    isHolding = isHolding,
-                    isCancelZone = isCancelZone,
-                    onHoldStart = {
-                        if (hasAudioPermission) {
                             isHolding = true
                             isCancelZone = false
                             dragOffsetY = 0f
@@ -201,7 +205,7 @@ fun ChatScreen(
                     },
                     onDragY = { dy ->
                         dragOffsetY += dy
-                        isCancelZone = dragOffsetY < -100f
+                        isCancelZone = dragOffsetY < -150f
                     }
                 )
             }
@@ -214,12 +218,209 @@ fun ChatScreen(
     }
 }
 
+enum class InputMode { IDLE, TEXT }
+
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+fun ChatInputBar(
+    value: String, onValueChange: (String) -> Unit, onSend: () -> Unit,
+    isLoading: Boolean, isHolding: Boolean, isCancelZone: Boolean,
+    inputMode: InputMode, onInputModeChange: (InputMode) -> Unit,
+    onHoldStart: () -> Unit, onHoldEnd: () -> Unit, onDragY: (Float) -> Unit
+) {
+    val focusManager = LocalFocusManager.current
+
+    // Animate mic button size
+    val micSize by animateDpAsState(
+        targetValue = if (inputMode == InputMode.IDLE) 64.dp else 48.dp,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
+        label = "micSize"
+    )
+
+    // Animate mic scale when holding
+    val holdScale by animateFloatAsState(
+        targetValue = if (isHolding) 1.2f else 1f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
+        label = "holdScale"
+    )
+
+    var lastY by remember { mutableFloatStateOf(0f) }
+
+    Surface(
+        tonalElevation = 3.dp,
+        color = MaterialTheme.colorScheme.surface,
+        shadowElevation = 4.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            when (inputMode) {
+                InputMode.IDLE -> {
+                    // Centered big mic button with text hints on sides
+                    TextButton(
+                        onClick = { onInputModeChange(InputMode.TEXT) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Type message...", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    // Big mic button - using pointerInteropFilter for reliable hold
+                    Box(
+                        modifier = Modifier
+                            .size(micSize)
+                            .scale(holdScale)
+                            .clip(CircleShape)
+                            .background(
+                                if (isHolding) {
+                                    if (isCancelZone) Color(0xFFE53935) else Color(0xFF0088CC)
+                                } else Color(0xFF0088CC)
+                            )
+                            .pointerInteropFilter { event ->
+                                when (event.action) {
+                                    MotionEvent.ACTION_DOWN -> {
+                                        lastY = event.y
+                                        onHoldStart()
+                                        true
+                                    }
+                                    MotionEvent.ACTION_MOVE -> {
+                                        val dy = event.y - lastY
+                                        lastY = event.y
+                                        onDragY(dy)
+                                        true
+                                    }
+                                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                        onHoldEnd()
+                                        true
+                                    }
+                                    else -> false
+                                }
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            painter = painterResource(id = R.drawable.ic_mic),
+                            contentDescription = "Hold to record",
+                            tint = Color.White,
+                            modifier = Modifier.size(if (inputMode == InputMode.IDLE) 32.dp else 24.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    TextButton(
+                        onClick = { onInputModeChange(InputMode.TEXT) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Type message...", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                    }
+                }
+
+                InputMode.TEXT -> {
+                    // Mic button shrunk to left
+                    Box(
+                        modifier = Modifier
+                            .size(micSize)
+                            .scale(holdScale)
+                            .clip(CircleShape)
+                            .background(
+                                if (isHolding) {
+                                    if (isCancelZone) Color(0xFFE53935) else Color(0xFF0088CC)
+                                } else Color(0xFF0088CC)
+                            )
+                            .pointerInteropFilter { event ->
+                                when (event.action) {
+                                    MotionEvent.ACTION_DOWN -> {
+                                        lastY = event.y
+                                        onHoldStart()
+                                        true
+                                    }
+                                    MotionEvent.ACTION_MOVE -> {
+                                        val dy = event.y - lastY
+                                        lastY = event.y
+                                        onDragY(dy)
+                                        true
+                                    }
+                                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                        onHoldEnd()
+                                        true
+                                    }
+                                    else -> false
+                                }
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            painter = painterResource(id = R.drawable.ic_mic),
+                            contentDescription = "Hold to record",
+                            tint = Color.White,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    // Text input field
+                    OutlinedTextField(
+                        value = value,
+                        onValueChange = onValueChange,
+                        modifier = Modifier.weight(1f),
+                        placeholder = { Text("Message") },
+                        maxLines = 4,
+                        shape = RoundedCornerShape(24.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+                        ),
+                        keyboardActions = KeyboardActions(
+                            onDone = {
+                                if (value.isNotBlank()) onSend()
+                            }
+                        )
+                    )
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    // Send button or back-to-idle button
+                    if (value.isNotBlank()) {
+                        FilledIconButton(
+                            onClick = onSend,
+                            enabled = !isLoading,
+                            modifier = Modifier.size(48.dp),
+                            colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary)
+                        ) {
+                            if (isLoading) {
+                                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                            } else {
+                                Icon(Icons.Default.Send, contentDescription = "Send", tint = MaterialTheme.colorScheme.onPrimary)
+                            }
+                        }
+                    } else {
+                        IconButton(onClick = {
+                            focusManager.clearFocus()
+                            onInputModeChange(InputMode.IDLE)
+                        }) {
+                            Icon(
+                                painter = painterResource(id = R.drawable.ic_keyboard),
+                                contentDescription = "Back to voice",
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 fun VoiceMessageBubble(
-    message: Message,
-    isPlaying: Boolean,
-    onPlay: () -> Unit,
-    onStop: () -> Unit
+    message: Message, isPlaying: Boolean, onPlay: () -> Unit, onStop: () -> Unit
 ) {
     val isUser = message.role == MessageRole.USER
     val alignment = if (isUser) Alignment.CenterEnd else Alignment.CenterStart
@@ -227,91 +428,44 @@ fun VoiceMessageBubble(
     val contentColor = if (isUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
 
     Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 2.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
         contentAlignment = alignment
     ) {
         Row(
             modifier = Modifier
                 .widthIn(min = 150.dp, max = 250.dp)
-                .clip(
-                    RoundedCornerShape(
-                        topStart = 16.dp, topEnd = 16.dp,
-                        bottomStart = if (isUser) 16.dp else 4.dp,
-                        bottomEnd = if (isUser) 4.dp else 16.dp
-                    )
-                )
+                .clip(RoundedCornerShape(
+                    topStart = 16.dp, topEnd = 16.dp,
+                    bottomStart = if (isUser) 16.dp else 4.dp,
+                    bottomEnd = if (isUser) 4.dp else 16.dp
+                ))
                 .background(bubbleColor)
                 .padding(horizontal = 8.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Play/Stop button
             IconButton(
                 onClick = { if (isPlaying) onStop() else onPlay() },
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(contentColor.copy(alpha = 0.2f))
+                modifier = Modifier.size(40.dp).clip(CircleShape).background(contentColor.copy(alpha = 0.2f))
             ) {
                 if (isPlaying) {
-                    Icon(
-                        painter = painterResource(id = R.drawable.ic_stop),
-                        contentDescription = "Stop",
-                        tint = contentColor,
-                        modifier = Modifier.size(24.dp)
-                    )
+                    Icon(painter = painterResource(id = R.drawable.ic_stop), contentDescription = "Stop", tint = contentColor, modifier = Modifier.size(24.dp))
                 } else {
-                    Icon(
-                        imageVector = Icons.Default.PlayArrow,
-                        contentDescription = "Play",
-                        tint = contentColor,
-                        modifier = Modifier.size(24.dp)
-                    )
+                    Icon(imageVector = Icons.Default.PlayArrow, contentDescription = "Play", tint = contentColor, modifier = Modifier.size(24.dp))
                 }
             }
-
             Spacer(modifier = Modifier.width(8.dp))
-
-            // Waveform placeholder + duration
             Column(modifier = Modifier.weight(1f)) {
-                // Simple waveform bars
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.height(24.dp)
-                ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically, modifier = Modifier.height(24.dp)) {
                     val heights = listOf(0.3f, 0.6f, 0.9f, 0.5f, 0.8f, 0.4f, 0.7f, 0.5f, 0.9f, 0.3f, 0.6f, 0.8f, 0.4f, 0.7f, 0.5f)
                     heights.forEach { h ->
-                        Box(
-                            modifier = Modifier
-                                .width(3.dp)
-                                .fillMaxHeight(h)
-                                .clip(RoundedCornerShape(2.dp))
-                                .background(
-                                    if (isPlaying) contentColor
-                                    else contentColor.copy(alpha = 0.5f)
-                                )
-                        )
+                        Box(modifier = Modifier.width(3.dp).fillMaxHeight(h).clip(RoundedCornerShape(2.dp))
+                            .background(if (isPlaying) contentColor else contentColor.copy(alpha = 0.5f)))
                     }
                 }
-
                 Spacer(modifier = Modifier.height(2.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        text = "${message.audioDuration}\"",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = contentColor.copy(alpha = 0.7f)
-                    )
-                    Text(
-                        text = formatTime(message.timestamp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = contentColor.copy(alpha = 0.6f)
-                    )
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(text = "${message.audioDuration}\"", style = MaterialTheme.typography.labelSmall, color = contentColor.copy(alpha = 0.7f))
+                    Text(text = formatTime(message.timestamp), style = MaterialTheme.typography.labelSmall, color = contentColor.copy(alpha = 0.6f))
                 }
             }
         }
@@ -322,7 +476,6 @@ fun VoiceMessageBubble(
 fun RecordingOverlay(seconds: Int, isCancelZone: Boolean) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f)))
-
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             val infiniteTransition = rememberInfiniteTransition(label = "pulse")
             val pulseScale by infiniteTransition.animateFloat(
@@ -330,24 +483,15 @@ fun RecordingOverlay(seconds: Int, isCancelZone: Boolean) {
                 animationSpec = infiniteRepeatable(tween(800), RepeatMode.Reverse),
                 label = "pulseScale"
             )
-
             Box(
                 modifier = Modifier.size(80.dp).scale(pulseScale).clip(CircleShape)
                     .background(if (isCancelZone) Color(0xFFE53935) else Color(0xFF0088CC)),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    painter = painterResource(id = R.drawable.ic_mic),
-                    contentDescription = null, tint = Color.White,
-                    modifier = Modifier.size(40.dp)
-                )
+                Icon(painter = painterResource(id = R.drawable.ic_mic), contentDescription = null, tint = Color.White, modifier = Modifier.size(40.dp))
             }
-
             Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                text = String.format("%d:%02d", seconds / 60, seconds % 60),
-                color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold
-            )
+            Text(text = String.format("%d:%02d", seconds / 60, seconds % 60), color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
             Spacer(modifier = Modifier.height(12.dp))
             Text(
                 text = if (isCancelZone) "↑ Release to cancel" else "↑ Slide up to cancel",
@@ -361,21 +505,11 @@ fun RecordingOverlay(seconds: Int, isCancelZone: Boolean) {
 @Composable
 fun TypingIndicator() {
     val infiniteTransition = rememberInfiniteTransition(label = "typing")
-    Row(
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
+    Row(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
         repeat(3) { index ->
-            val alpha by infiniteTransition.animateFloat(
-                initialValue = 0.3f, targetValue = 1f,
-                animationSpec = infiniteRepeatable(tween(600), RepeatMode.Reverse, StartOffset(index * 200)),
-                label = "dot_$index"
-            )
-            Box(
-                modifier = Modifier.size(8.dp).clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha))
-            )
+            val alpha by infiniteTransition.animateFloat(initialValue = 0.3f, targetValue = 1f,
+                animationSpec = infiniteRepeatable(tween(600), RepeatMode.Reverse, StartOffset(index * 200)), label = "dot_$index")
+            Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha)))
         }
     }
 }
@@ -394,104 +528,14 @@ fun MessageBubble(message: Message) {
     ) {
         Column(
             modifier = Modifier.widthIn(max = 300.dp).clip(
-                RoundedCornerShape(
-                    topStart = 16.dp, topEnd = 16.dp,
-                    bottomStart = if (isUser) 16.dp else 4.dp,
-                    bottomEnd = if (isUser) 4.dp else 16.dp
-                )
+                RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp,
+                    bottomStart = if (isUser) 16.dp else 4.dp, bottomEnd = if (isUser) 4.dp else 16.dp)
             ).background(bubbleColor).padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
             Text(text = message.content, color = textColor, style = MaterialTheme.typography.bodyMedium)
             Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = formatTime(message.timestamp),
-                color = textColor.copy(alpha = 0.6f),
-                style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.align(Alignment.End)
-            )
-        }
-    }
-}
-
-@Composable
-fun ChatInputBar(
-    value: String, onValueChange: (String) -> Unit, onSend: () -> Unit,
-    isLoading: Boolean, isVoiceMode: Boolean, onToggleVoiceMode: () -> Unit,
-    isHolding: Boolean, isCancelZone: Boolean,
-    onHoldStart: () -> Unit, onHoldEnd: () -> Unit, onDragY: (Float) -> Unit
-) {
-    Surface(tonalElevation = 3.dp, color = MaterialTheme.colorScheme.surface, shadowElevation = 4.dp) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = onToggleVoiceMode) {
-                AnimatedContent(
-                    targetState = isVoiceMode,
-                    transitionSpec = { scaleIn(tween(150)) + fadeIn(tween(150)) togetherWith scaleOut(tween(150)) + fadeOut(tween(150)) },
-                    label = "modeToggle"
-                ) { voice ->
-                    if (voice) {
-                        Icon(painter = painterResource(id = R.drawable.ic_keyboard), contentDescription = "Keyboard", modifier = Modifier.size(24.dp))
-                    } else {
-                        Icon(painter = painterResource(id = R.drawable.ic_mic), contentDescription = "Voice", modifier = Modifier.size(24.dp))
-                    }
-                }
-            }
-
-            if (isVoiceMode) {
-                Box(
-                    modifier = Modifier.weight(1f).height(48.dp).clip(RoundedCornerShape(24.dp))
-                        .background(
-                            if (isHolding) {
-                                if (isCancelZone) MaterialTheme.colorScheme.error.copy(alpha = 0.2f)
-                                else MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-                            } else MaterialTheme.colorScheme.surfaceVariant
-                        )
-                        .pointerInput(Unit) {
-                            detectTapGestures(onPress = { onHoldStart(); tryAwaitRelease(); onHoldEnd() })
-                        }
-                        .pointerInput(Unit) {
-                            detectDragGestures { _, dragAmount -> onDragY(dragAmount.y) }
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = if (isHolding) {
-                            if (isCancelZone) "Release to cancel" else "Release to send"
-                        } else "Hold to Talk",
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
-                        color = if (isHolding && isCancelZone) MaterialTheme.colorScheme.error
-                        else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            } else {
-                OutlinedTextField(
-                    value = value, onValueChange = onValueChange,
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text("Message") }, maxLines = 4,
-                    shape = RoundedCornerShape(24.dp),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = MaterialTheme.colorScheme.primary,
-                        unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
-                    )
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                if (value.isNotBlank()) {
-                    FilledIconButton(
-                        onClick = onSend, enabled = !isLoading,
-                        modifier = Modifier.size(48.dp),
-                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary)
-                    ) {
-                        if (isLoading) {
-                            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
-                        } else {
-                            Icon(Icons.Default.Send, contentDescription = "Send", tint = MaterialTheme.colorScheme.onPrimary)
-                        }
-                    }
-                }
-            }
+            Text(text = formatTime(message.timestamp), color = textColor.copy(alpha = 0.6f),
+                style = MaterialTheme.typography.labelSmall, modifier = Modifier.align(Alignment.End))
         }
     }
 }
@@ -502,12 +546,8 @@ fun EmptyChat() {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(text = "🎙️", style = MaterialTheme.typography.displayLarge)
             Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                text = "Tap 🎤 to switch to voice\nor type a message",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center
-            )
+            Text(text = "Hold the mic button to talk\nor tap to type a message",
+                style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
         }
     }
 }
