@@ -142,9 +142,25 @@ class ChatViewModel @Inject constructor(
         )
     }
 
+    fun clearError() {
+        _uiState.value = _uiState.value.copy(error = null)
+    }
+
+    fun startVoiceRecording() {
+        _uiState.value = _uiState.value.copy(isRecording = true)
+        // TODO: Start actual audio recording via VoiceEngine
+    }
+
+    fun stopVoiceRecording() {
+        _uiState.value = _uiState.value.copy(isRecording = false)
+        // TODO: Stop recording, send audio to server for STT, then send as message
+        // For now, show a placeholder message
+    }
+
     data class ChatUiState(
         val inputText: String = "",
         val isLoading: Boolean = false,
-        val error: String? = null
+        val error: String? = null,
+        val isRecording: Boolean = false
     )
 }
