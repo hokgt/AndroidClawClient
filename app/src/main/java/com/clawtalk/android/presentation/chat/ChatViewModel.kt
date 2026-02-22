@@ -9,8 +9,10 @@ import com.clawtalk.android.data.repository.SettingsRepository
 import com.clawtalk.android.domain.model.Message
 import com.clawtalk.android.domain.model.MessageRole
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.*
 import javax.inject.Inject
 
@@ -97,41 +99,33 @@ class ChatViewModel @Inject constructor(
                 )
             } + OpenAiApiClient.ChatMessage(role = "user", content = content)
 
-            // Collect AI response
-            var assistantContent = ""
+            // Send message and get response
+            val result = withContext(Dispatchers.IO) {
+                openAiApiClient.sendMessage(
+                    gatewayUrl = gatewayUrl,
+                    authToken = authToken,
+                    agentId = currentAgentId,
+                    messages = history,
+                    userId = userId
+                )
+            }
 
-            openAiApiClient.sendMessageStream(
-                gatewayUrl = gatewayUrl,
-                authToken = authToken,
-                agentId = currentAgentId,
-                messages = history,
-                userId = userId
-            ).collect { event ->
-                when (event) {
-                    is OpenAiApiClient.StreamEvent.Content -> {
-                        assistantContent += event.text
-                        // Update UI with streaming content (optional - could show typing indicator)
-                    }
-                    is OpenAiApiClient.StreamEvent.Done -> {
-                        // Save complete message
-                        val assistantMessage = MessageEntity(
-                            id = UUID.randomUUID().toString(),
-                            sessionId = currentAgentId,
-                            content = assistantContent,
-                            role = MessageRole.ASSISTANT.name,
-                            timestamp = System.currentTimeMillis(),
-                            isVoice = false
-                        )
-                        messageDao.insertMessage(assistantMessage)
-                        _uiState.value = _uiState.value.copy(isLoading = false)
-                    }
-                    is OpenAiApiClient.StreamEvent.Error -> {
-                        _uiState.value = _uiState.value.copy(
-                            isLoading = false,
-                            error = event.message
-                        )
-                    }
-                }
+            result.onSuccess { responseContent ->
+                val assistantMessage = MessageEntity(
+                    id = UUID.randomUUID().toString(),
+                    sessionId = currentAgentId,
+                    content = responseContent,
+                    role = MessageRole.ASSISTANT.name,
+                    timestamp = System.currentTimeMillis(),
+                    isVoice = false
+                )
+                messageDao.insertMessage(assistantMessage)
+                _uiState.value = _uiState.value.copy(isLoading = false)
+            }.onFailure { err ->
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    error = err.message ?: "Failed to get response"
+                )
             }
         }
     }

@@ -142,6 +142,61 @@ class OpenAiApiClient @Inject constructor(
         }
     }
 
+    suspend fun sendMessage(
+        gatewayUrl: String,
+        authToken: String,
+        agentId: String,
+        messages: List<ChatMessage>,
+        userId: String
+    ): Result<String> {
+        return try {
+            val url = gatewayUrl.trimEnd('/')
+            val requestBody = ChatCompletionRequest(
+                model = "openclaw:$agentId",
+                messages = messages,
+                stream = false,
+                user = userId
+            )
+
+            val request = Request.Builder()
+                .url("$url/v1/chat/completions")
+                .post(gson.toJson(requestBody).toRequestBody("application/json".toMediaType()))
+                .header("Authorization", "Bearer $authToken")
+                .header("Content-Type", "application/json")
+                .header("x-openclaw-agent-id", agentId)
+                .build()
+
+            val response = client.newCall(request).execute()
+
+            if (!response.isSuccessful) {
+                return Result.failure(Exception("HTTP ${response.code}: ${response.message}"))
+            }
+
+            val body = response.body?.string() ?: "{}"
+            val chatResponse = gson.fromJson(body, ChatCompletionResponse::class.java)
+            val content = chatResponse.choices.firstOrNull()?.message?.content ?: ""
+            Result.success(content)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    data class ChatCompletionResponse(
+        val id: String,
+        val choices: List<ResponseChoice>
+    )
+
+    data class ResponseChoice(
+        val index: Int,
+        val message: ResponseMessage,
+        val finish_reason: String?
+    )
+
+    data class ResponseMessage(
+        val role: String,
+        val content: String
+    )
+
     data class ChatMessage(
         val role: String,
         val content: String
