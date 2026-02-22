@@ -181,7 +181,7 @@ fun ChatScreen(
                     onValueChange = viewModel::onInputTextChange,
                     onSend = {
                         viewModel.sendMessage()
-                        inputMode = InputMode.IDLE
+                        // Stay in current input mode after sending
                     },
                     isLoading = uiState.isLoading,
                     isHolding = isHolding,
@@ -218,7 +218,8 @@ fun ChatScreen(
     }
 }
 
-enum class InputMode { IDLE, TEXT }
+// IDLE = big mic centered, LEFT = text on left + mic on right, RIGHT = text on right + mic on left
+enum class InputMode { IDLE, LEFT, RIGHT }
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
@@ -230,21 +231,122 @@ fun ChatInputBar(
 ) {
     val focusManager = LocalFocusManager.current
 
-    // Animate mic button size
     val micSize by animateDpAsState(
         targetValue = if (inputMode == InputMode.IDLE) 64.dp else 48.dp,
         animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
         label = "micSize"
     )
 
-    // Animate mic scale when holding
     val holdScale by animateFloatAsState(
         targetValue = if (isHolding) 1.2f else 1f,
         animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
         label = "holdScale"
     )
 
+    val micIconSize by animateDpAsState(
+        targetValue = if (inputMode == InputMode.IDLE) 32.dp else 24.dp,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
+        label = "micIconSize"
+    )
+
     var lastY by remember { mutableFloatStateOf(0f) }
+
+    // Mic button composable (reused in all modes)
+    @Composable
+    fun MicButton(isSmall: Boolean) {
+        Box(
+            modifier = Modifier
+                .size(micSize)
+                .scale(holdScale)
+                .clip(CircleShape)
+                .background(
+                    if (isHolding) {
+                        if (isCancelZone) Color(0xFFE53935) else Color(0xFF0088CC)
+                    } else Color(0xFF0088CC)
+                )
+                .pointerInteropFilter { event ->
+                    when (event.action) {
+                        MotionEvent.ACTION_DOWN -> {
+                            lastY = event.y
+                            onHoldStart()
+                            true
+                        }
+                        MotionEvent.ACTION_MOVE -> {
+                            val dy = event.y - lastY
+                            lastY = event.y
+                            onDragY(dy)
+                            true
+                        }
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                            onHoldEnd()
+                            true
+                        }
+                        else -> false
+                    }
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                painter = painterResource(id = R.drawable.ic_mic),
+                contentDescription = "Hold to record",
+                tint = Color.White,
+                modifier = Modifier.size(micIconSize)
+            )
+        }
+    }
+
+    // Small mic that returns to IDLE on tap
+    @Composable
+    fun SmallMicButton() {
+        FilledIconButton(
+            onClick = {
+                focusManager.clearFocus()
+                onInputModeChange(InputMode.IDLE)
+            },
+            modifier = Modifier.size(48.dp),
+            colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color(0xFF0088CC))
+        ) {
+            Icon(
+                painter = painterResource(id = R.drawable.ic_mic),
+                contentDescription = "Back to voice",
+                tint = Color.White,
+                modifier = Modifier.size(24.dp)
+            )
+        }
+    }
+
+    // Text field + send button composable
+    @Composable
+    fun RowScope.TextFieldWithSend() {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = Modifier.weight(1f),
+            placeholder = { Text("Message") },
+            maxLines = 4,
+            shape = RoundedCornerShape(24.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+            ),
+            keyboardActions = KeyboardActions(onDone = { if (value.isNotBlank()) onSend() })
+        )
+        if (value.isNotBlank()) {
+            Spacer(modifier = Modifier.width(6.dp))
+            FilledIconButton(
+                onClick = onSend,
+                enabled = !isLoading,
+                modifier = Modifier.size(48.dp),
+                colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary)
+            ) {
+                if (isLoading) {
+                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                } else {
+                    Icon(Icons.Default.Send, contentDescription = "Send", tint = MaterialTheme.colorScheme.onPrimary)
+                }
+            }
+        }
+    }
 
     Surface(
         tonalElevation = 3.dp,
@@ -260,9 +362,9 @@ fun ChatInputBar(
         ) {
             when (inputMode) {
                 InputMode.IDLE -> {
-                    // Centered big mic button with text hints on sides
+                    // Left text hint → tap to enter LEFT mode (text left, mic goes right)
                     TextButton(
-                        onClick = { onInputModeChange(InputMode.TEXT) },
+                        onClick = { onInputModeChange(InputMode.LEFT) },
                         modifier = Modifier.weight(1f)
                     ) {
                         Text("Type message...", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
@@ -270,148 +372,32 @@ fun ChatInputBar(
 
                     Spacer(modifier = Modifier.width(8.dp))
 
-                    // Big mic button - using pointerInteropFilter for reliable hold
-                    Box(
-                        modifier = Modifier
-                            .size(micSize)
-                            .scale(holdScale)
-                            .clip(CircleShape)
-                            .background(
-                                if (isHolding) {
-                                    if (isCancelZone) Color(0xFFE53935) else Color(0xFF0088CC)
-                                } else Color(0xFF0088CC)
-                            )
-                            .pointerInteropFilter { event ->
-                                when (event.action) {
-                                    MotionEvent.ACTION_DOWN -> {
-                                        lastY = event.y
-                                        onHoldStart()
-                                        true
-                                    }
-                                    MotionEvent.ACTION_MOVE -> {
-                                        val dy = event.y - lastY
-                                        lastY = event.y
-                                        onDragY(dy)
-                                        true
-                                    }
-                                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                                        onHoldEnd()
-                                        true
-                                    }
-                                    else -> false
-                                }
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            painter = painterResource(id = R.drawable.ic_mic),
-                            contentDescription = "Hold to record",
-                            tint = Color.White,
-                            modifier = Modifier.size(if (inputMode == InputMode.IDLE) 32.dp else 24.dp)
-                        )
-                    }
+                    // Big centered mic button
+                    MicButton(isSmall = false)
 
                     Spacer(modifier = Modifier.width(8.dp))
 
+                    // Right text hint → tap to enter RIGHT mode (text right, mic goes left)
                     TextButton(
-                        onClick = { onInputModeChange(InputMode.TEXT) },
+                        onClick = { onInputModeChange(InputMode.RIGHT) },
                         modifier = Modifier.weight(1f)
                     ) {
                         Text("Type message...", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
                     }
                 }
 
-                InputMode.TEXT -> {
-                    // Mic button shrunk to left
-                    Box(
-                        modifier = Modifier
-                            .size(micSize)
-                            .scale(holdScale)
-                            .clip(CircleShape)
-                            .background(
-                                if (isHolding) {
-                                    if (isCancelZone) Color(0xFFE53935) else Color(0xFF0088CC)
-                                } else Color(0xFF0088CC)
-                            )
-                            .pointerInteropFilter { event ->
-                                when (event.action) {
-                                    MotionEvent.ACTION_DOWN -> {
-                                        lastY = event.y
-                                        onHoldStart()
-                                        true
-                                    }
-                                    MotionEvent.ACTION_MOVE -> {
-                                        val dy = event.y - lastY
-                                        lastY = event.y
-                                        onDragY(dy)
-                                        true
-                                    }
-                                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                                        onHoldEnd()
-                                        true
-                                    }
-                                    else -> false
-                                }
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            painter = painterResource(id = R.drawable.ic_mic),
-                            contentDescription = "Hold to record",
-                            tint = Color.White,
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
-
+                InputMode.LEFT -> {
+                    // Text field on left, mic on right
+                    TextFieldWithSend()
                     Spacer(modifier = Modifier.width(6.dp))
+                    SmallMicButton()
+                }
 
-                    // Text input field
-                    OutlinedTextField(
-                        value = value,
-                        onValueChange = onValueChange,
-                        modifier = Modifier.weight(1f),
-                        placeholder = { Text("Message") },
-                        maxLines = 4,
-                        shape = RoundedCornerShape(24.dp),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = MaterialTheme.colorScheme.primary,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
-                        ),
-                        keyboardActions = KeyboardActions(
-                            onDone = {
-                                if (value.isNotBlank()) onSend()
-                            }
-                        )
-                    )
-
+                InputMode.RIGHT -> {
+                    // Mic on left, text field on right
+                    SmallMicButton()
                     Spacer(modifier = Modifier.width(6.dp))
-
-                    // Send button or back-to-idle button
-                    if (value.isNotBlank()) {
-                        FilledIconButton(
-                            onClick = onSend,
-                            enabled = !isLoading,
-                            modifier = Modifier.size(48.dp),
-                            colors = IconButtonDefaults.filledIconButtonColors(containerColor = MaterialTheme.colorScheme.primary)
-                        ) {
-                            if (isLoading) {
-                                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
-                            } else {
-                                Icon(Icons.Default.Send, contentDescription = "Send", tint = MaterialTheme.colorScheme.onPrimary)
-                            }
-                        }
-                    } else {
-                        IconButton(onClick = {
-                            focusManager.clearFocus()
-                            onInputModeChange(InputMode.IDLE)
-                        }) {
-                            Icon(
-                                painter = painterResource(id = R.drawable.ic_keyboard),
-                                contentDescription = "Back to voice",
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
-                    }
+                    TextFieldWithSend()
                 }
             }
         }
