@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.clawtalk.android.data.local.MessageDao
 import com.clawtalk.android.data.local.entity.MessageEntity
 import com.clawtalk.android.data.remote.OpenAiApiClient
+import com.clawtalk.android.data.remote.SttClient
 import com.clawtalk.android.data.remote.VoiceChatClient
 import com.clawtalk.android.data.repository.SettingsRepository
 import com.clawtalk.android.domain.model.Message
@@ -30,6 +31,7 @@ class ChatViewModel @Inject constructor(
     private val settingsRepository: SettingsRepository,
     private val openAiApiClient: OpenAiApiClient,
     private val voiceChatClient: VoiceChatClient,
+    private val sttClient: SttClient,
     private val audioRecorder: AudioRecorder,
     val voicePlayer: VoiceMessagePlayer,
     private val ttsEngine: TtsEngine
@@ -134,43 +136,61 @@ class ChatViewModel @Inject constructor(
             )
             messageDao.insertMessage(voiceMessage)
 
-            // 2. Show loading indicator for agent response
+            // 2. Show loading indicator
             _uiState.value = _uiState.value.copy(isLoading = true, error = null)
 
-            // 3. Upload to relay (STT + send to agent) in background
-            val result = withContext(Dispatchers.IO) {
-                voiceChatClient.sendVoiceMessage(
-                    gatewayUrl = gatewayUrl,
-                    authToken = authToken,
-                    agentId = currentAgentId,
-                    audioFile = audioFile,
-                    userId = userId
-                )
-            }
-
-            result.onSuccess { vcResponse ->
-                // Update voice bubble with transcription if available
-                if (vcResponse.transcript.isNotBlank()) {
-                    val updatedVoice = voiceMessage.copy(content = "🎤 ${vcResponse.transcript}")
-                    messageDao.insertMessage(updatedVoice)
+            try {
+                // 3. STT: transcribe audio to text
+                val sttResult = withContext(Dispatchers.IO) {
+                    sttClient.transcribeAudio(
+                        gatewayUrl = gatewayUrl,
+                        authToken = authToken,
+                        audioFile = audioFile
+                    )
                 }
 
-                // Save agent reply — synthesize TTS so it appears as voice bubble
-                if (vcResponse.agentReply.isNotBlank()) {
+                val transcript = sttResult.getOrNull()
+
+                if (transcript.isNullOrBlank()) {
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        error = "Could not transcribe voice message"
+                    )
+                    return@launch
+                }
+
+                // 4. Update voice bubble with transcription
+                val updatedVoice = voiceMessage.copy(content = "🎤 $transcript")
+                messageDao.insertMessage(updatedVoice)
+
+                // 5. Send transcribed text via the SAME chat completions API as text messages
+                val history = buildMessageHistory() + OpenAiApiClient.ChatMessage(role = "user", content = transcript)
+
+                val chatResult = withContext(Dispatchers.IO) {
+                    openAiApiClient.sendMessage(
+                        gatewayUrl = gatewayUrl,
+                        authToken = authToken,
+                        agentId = currentAgentId,
+                        messages = history,
+                        userId = userId
+                    )
+                }
+
+                chatResult.onSuccess { replyText ->
+                    // 6. TTS: synthesize agent reply as voice
                     val replyId = UUID.randomUUID().toString()
                     val ttsFile = File(context.cacheDir, "tts_${replyId}.wav")
 
                     val ttsSuccess = withContext(Dispatchers.IO) {
-                        ttsEngine.synthesize(vcResponse.agentReply, ttsFile)
+                        ttsEngine.synthesize(replyText, ttsFile)
                     }
 
                     val assistantMessage = if (ttsSuccess && ttsFile.exists()) {
-                        // Estimate duration from file size (16kHz 16-bit mono ≈ 32KB/s)
                         val estimatedDuration = (ttsFile.length() / 32000).toInt().coerceAtLeast(1)
                         MessageEntity(
                             id = replyId,
                             sessionId = currentAgentId,
-                            content = vcResponse.agentReply,
+                            content = replyText,
                             role = MessageRole.ASSISTANT.name,
                             timestamp = System.currentTimeMillis(),
                             isVoice = true,
@@ -182,20 +202,24 @@ class ChatViewModel @Inject constructor(
                         MessageEntity(
                             id = replyId,
                             sessionId = currentAgentId,
-                            content = vcResponse.agentReply,
+                            content = replyText,
                             role = MessageRole.ASSISTANT.name,
                             timestamp = System.currentTimeMillis(),
                             isVoice = false
                         )
                     }
                     messageDao.insertMessage(assistantMessage)
+                    _uiState.value = _uiState.value.copy(isLoading = false)
+                }.onFailure { err ->
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        error = err.message ?: "Failed to get agent reply"
+                    )
                 }
-
-                _uiState.value = _uiState.value.copy(isLoading = false)
-            }.onFailure { err ->
+            } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
-                    error = err.message ?: "Voice chat failed"
+                    error = e.message ?: "Voice chat failed"
                 )
             }
         }
