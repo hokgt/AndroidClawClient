@@ -1,6 +1,6 @@
 package com.clawtalk.android.di
 
-import com.clawtalk.android.data.remote.WebSocketClient
+import com.clawtalk.android.data.remote.OpenAiApiClient
 import com.google.gson.Gson
 import dagger.Module
 import dagger.Provides
@@ -19,18 +19,14 @@ object NetworkModule {
     fun provideOkHttpClient(): OkHttpClient {
         return OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
-            .pingInterval(20, TimeUnit.SECONDS)
             .build()
     }
 
     @Provides
     @Singleton
-    fun provideWebSocketClient(
-        okHttpClient: OkHttpClient,
-        gson: Gson
-    ): WebSocketClient {
-        return WebSocketClient(okHttpClient, gson)
+    fun provideOpenAiApiClient(gson: Gson): OpenAiApiClient {
+        return OpenAiApiClient(gson)
     }
 }
