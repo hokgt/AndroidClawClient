@@ -104,11 +104,26 @@ class ChatViewModel @Inject constructor(
     private fun transcribeAndSendVoice(audioFile: File, duration: Int) {
         if (currentAgentId.isBlank() || gatewayUrl.isBlank()) return
 
+        val voiceMessageId = UUID.randomUUID().toString()
+
         viewModelScope.launch {
+            // 1. Save voice bubble IMMEDIATELY so user sees it right away
+            val voiceMessage = MessageEntity(
+                id = voiceMessageId,
+                sessionId = currentAgentId,
+                content = "🎤 Voice message (${duration}s)",
+                role = MessageRole.USER.name,
+                timestamp = System.currentTimeMillis(),
+                isVoice = true,
+                audioUrl = audioFile.absolutePath,
+                audioDuration = duration
+            )
+            messageDao.insertMessage(voiceMessage)
+
+            // 2. Show loading indicator for agent response
             _uiState.value = _uiState.value.copy(isLoading = true, error = null)
 
-            // Single call: upload audio → relay saves OGG to OpenClaw media/inbound,
-            // transcribes via Google STT, sends to agent with media tag (like Telegram)
+            // 3. Upload to relay (STT + send to agent) in background
             val result = withContext(Dispatchers.IO) {
                 voiceChatClient.sendVoiceMessage(
                     gatewayUrl = gatewayUrl,
@@ -120,24 +135,11 @@ class ChatViewModel @Inject constructor(
             }
 
             result.onSuccess { vcResponse ->
-                // Save user voice message
-                val displayText = if (vcResponse.transcript.isNotBlank()) {
-                    "🎤 ${vcResponse.transcript}"
-                } else {
-                    "🎤 Voice message (${duration}s)"
+                // Update voice bubble with transcription if available
+                if (vcResponse.transcript.isNotBlank()) {
+                    val updatedVoice = voiceMessage.copy(content = "🎤 ${vcResponse.transcript}")
+                    messageDao.insertMessage(updatedVoice)
                 }
-
-                val voiceMessage = MessageEntity(
-                    id = UUID.randomUUID().toString(),
-                    sessionId = currentAgentId,
-                    content = displayText,
-                    role = MessageRole.USER.name,
-                    timestamp = System.currentTimeMillis(),
-                    isVoice = true,
-                    audioUrl = audioFile.absolutePath,
-                    audioDuration = duration
-                )
-                messageDao.insertMessage(voiceMessage)
 
                 // Save agent reply
                 if (vcResponse.agentReply.isNotBlank()) {
@@ -154,19 +156,6 @@ class ChatViewModel @Inject constructor(
 
                 _uiState.value = _uiState.value.copy(isLoading = false)
             }.onFailure { err ->
-                // Save voice message even on error
-                val voiceMessage = MessageEntity(
-                    id = UUID.randomUUID().toString(),
-                    sessionId = currentAgentId,
-                    content = "🎤 Voice message (${duration}s)",
-                    role = MessageRole.USER.name,
-                    timestamp = System.currentTimeMillis(),
-                    isVoice = true,
-                    audioUrl = audioFile.absolutePath,
-                    audioDuration = duration
-                )
-                messageDao.insertMessage(voiceMessage)
-
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
                     error = err.message ?: "Voice chat failed"
