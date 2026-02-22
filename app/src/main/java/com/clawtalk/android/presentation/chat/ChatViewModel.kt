@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.clawtalk.android.data.local.MessageDao
 import com.clawtalk.android.data.local.entity.MessageEntity
 import com.clawtalk.android.data.remote.OpenAiApiClient
+import com.clawtalk.android.data.remote.SttClient
 import com.clawtalk.android.data.repository.SettingsRepository
 import com.clawtalk.android.domain.model.Message
 import com.clawtalk.android.domain.model.MessageRole
@@ -15,6 +16,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.*
 import javax.inject.Inject
 
@@ -23,6 +25,7 @@ class ChatViewModel @Inject constructor(
     private val messageDao: MessageDao,
     private val settingsRepository: SettingsRepository,
     private val openAiApiClient: OpenAiApiClient,
+    private val sttClient: SttClient,
     private val audioRecorder: AudioRecorder,
     val voicePlayer: VoiceMessagePlayer
 ) : ViewModel() {
@@ -37,9 +40,6 @@ class ChatViewModel @Inject constructor(
     private var gatewayUrl: String = ""
     private var authToken: String = ""
     private val userId = UUID.randomUUID().toString()
-
-    // Store transcription from SpeechRecognizer running in UI layer
-    private var pendingTranscription: String = ""
 
     init {
         viewModelScope.launch {
@@ -79,22 +79,16 @@ class ChatViewModel @Inject constructor(
     }
 
     fun startVoiceRecording() {
-        pendingTranscription = ""
         val file = audioRecorder.startRecording()
         if (file != null) {
             _uiState.value = _uiState.value.copy(isRecording = true)
         }
     }
 
-    fun updateTranscription(text: String) {
-        pendingTranscription = text
-    }
-
     fun stopVoiceRecording(cancelled: Boolean) {
         if (cancelled) {
             audioRecorder.cancelRecording()
             _uiState.value = _uiState.value.copy(isRecording = false)
-            pendingTranscription = ""
             return
         }
 
@@ -102,27 +96,37 @@ class ChatViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(isRecording = false)
 
         if (result != null && result.durationSeconds > 0) {
-            doSendVoiceMessage(
-                audioPath = result.file.absolutePath,
-                duration = result.durationSeconds,
-                transcription = pendingTranscription
-            )
+            // Upload to server for STT
+            transcribeAndSendVoice(result.file, result.durationSeconds)
         }
-        pendingTranscription = ""
     }
 
-    private fun doSendVoiceMessage(audioPath: String, duration: Int, transcription: String) {
-        if (currentAgentId.isBlank()) return
+    private fun transcribeAndSendVoice(audioFile: File, duration: Int) {
+        if (currentAgentId.isBlank() || gatewayUrl.isBlank()) return
 
         viewModelScope.launch {
-            // Display text: show transcription if available, otherwise generic label
+            _uiState.value = _uiState.value.copy(isLoading = true, error = null)
+
+            // 1. Upload to server STT
+            val sttResult = withContext(Dispatchers.IO) {
+                sttClient.transcribeAudio(
+                    gatewayUrl = gatewayUrl,
+                    authToken = authToken,
+                    audioFile = audioFile,
+                    language = "id-ID"
+                )
+            }
+
+            // 2. Get transcription or use fallback
+            val transcription = sttResult.getOrNull() ?: ""
+
+            // 3. Save voice message to DB
             val displayText = if (transcription.isNotBlank()) {
                 "🎤 $transcription"
             } else {
                 "🎤 Voice message (${duration}s)"
             }
 
-            // Save voice message to DB (shown as voice bubble)
             val voiceMessage = MessageEntity(
                 id = UUID.randomUUID().toString(),
                 sessionId = currentAgentId,
@@ -130,23 +134,20 @@ class ChatViewModel @Inject constructor(
                 role = MessageRole.USER.name,
                 timestamp = System.currentTimeMillis(),
                 isVoice = true,
-                audioUrl = audioPath,
+                audioUrl = audioFile.absolutePath,
                 audioDuration = duration
             )
             messageDao.insertMessage(voiceMessage)
-            _uiState.value = _uiState.value.copy(isLoading = true, error = null)
 
-            // Send actual transcription to AI (or fallback message)
-            val textToSend = if (transcription.isNotBlank()) {
-                transcription
-            } else {
-                "[User sent a ${duration}s voice message but transcription failed. Ask them to repeat or type it.]"
+            // 4. Send transcription to AI
+            val textToSend = transcription.ifBlank {
+                "[User sent a ${duration}s voice message in Indonesian. Please respond helpfully.]"
             }
 
             val history = buildMessageHistory()
             val messages = history + OpenAiApiClient.ChatMessage(role = "user", content = textToSend)
 
-            val result = withContext(Dispatchers.IO) {
+            val aiResult = withContext(Dispatchers.IO) {
                 openAiApiClient.sendMessage(
                     gatewayUrl = gatewayUrl,
                     authToken = authToken,
@@ -156,7 +157,7 @@ class ChatViewModel @Inject constructor(
                 )
             }
 
-            handleAiResponse(result)
+            handleAiResponse(aiResult)
         }
     }
 
