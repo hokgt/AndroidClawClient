@@ -5,7 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.clawtalk.android.data.local.MessageDao
 import com.clawtalk.android.data.local.entity.MessageEntity
 import com.clawtalk.android.data.remote.OpenAiApiClient
-import com.clawtalk.android.data.remote.SttClient
+import com.clawtalk.android.data.remote.VoiceChatClient
 import com.clawtalk.android.data.repository.SettingsRepository
 import com.clawtalk.android.domain.model.Message
 import com.clawtalk.android.domain.model.MessageRole
@@ -25,7 +25,7 @@ class ChatViewModel @Inject constructor(
     private val messageDao: MessageDao,
     private val settingsRepository: SettingsRepository,
     private val openAiApiClient: OpenAiApiClient,
-    private val sttClient: SttClient,
+    private val voiceChatClient: VoiceChatClient,
     private val audioRecorder: AudioRecorder,
     val voicePlayer: VoiceMessagePlayer
 ) : ViewModel() {
@@ -107,57 +107,71 @@ class ChatViewModel @Inject constructor(
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true, error = null)
 
-            // 1. Upload to server STT
-            val sttResult = withContext(Dispatchers.IO) {
-                sttClient.transcribeAudio(
-                    gatewayUrl = gatewayUrl,
-                    authToken = authToken,
-                    audioFile = audioFile,
-                    language = "id-ID"
-                )
-            }
-
-            // 2. Get transcription or use fallback
-            val transcription = sttResult.getOrNull() ?: ""
-
-            // 3. Save voice message to DB
-            val displayText = if (transcription.isNotBlank()) {
-                "🎤 $transcription"
-            } else {
-                "🎤 Voice message (${duration}s)"
-            }
-
-            val voiceMessage = MessageEntity(
-                id = UUID.randomUUID().toString(),
-                sessionId = currentAgentId,
-                content = displayText,
-                role = MessageRole.USER.name,
-                timestamp = System.currentTimeMillis(),
-                isVoice = true,
-                audioUrl = audioFile.absolutePath,
-                audioDuration = duration
-            )
-            messageDao.insertMessage(voiceMessage)
-
-            // 4. Send transcription to AI
-            val textToSend = transcription.ifBlank {
-                "[User sent a ${duration}s voice message in Indonesian. Please respond helpfully.]"
-            }
-
-            val history = buildMessageHistory()
-            val messages = history + OpenAiApiClient.ChatMessage(role = "user", content = textToSend)
-
-            val aiResult = withContext(Dispatchers.IO) {
-                openAiApiClient.sendMessage(
+            // Single call: upload audio → relay saves OGG to OpenClaw media/inbound,
+            // transcribes via Google STT, sends to agent with media tag (like Telegram)
+            val result = withContext(Dispatchers.IO) {
+                voiceChatClient.sendVoiceMessage(
                     gatewayUrl = gatewayUrl,
                     authToken = authToken,
                     agentId = currentAgentId,
-                    messages = messages,
+                    audioFile = audioFile,
                     userId = userId
                 )
             }
 
-            handleAiResponse(aiResult)
+            result.onSuccess { vcResponse ->
+                // Save user voice message
+                val displayText = if (vcResponse.transcript.isNotBlank()) {
+                    "🎤 ${vcResponse.transcript}"
+                } else {
+                    "🎤 Voice message (${duration}s)"
+                }
+
+                val voiceMessage = MessageEntity(
+                    id = UUID.randomUUID().toString(),
+                    sessionId = currentAgentId,
+                    content = displayText,
+                    role = MessageRole.USER.name,
+                    timestamp = System.currentTimeMillis(),
+                    isVoice = true,
+                    audioUrl = audioFile.absolutePath,
+                    audioDuration = duration
+                )
+                messageDao.insertMessage(voiceMessage)
+
+                // Save agent reply
+                if (vcResponse.agentReply.isNotBlank()) {
+                    val assistantMessage = MessageEntity(
+                        id = UUID.randomUUID().toString(),
+                        sessionId = currentAgentId,
+                        content = vcResponse.agentReply,
+                        role = MessageRole.ASSISTANT.name,
+                        timestamp = System.currentTimeMillis(),
+                        isVoice = false
+                    )
+                    messageDao.insertMessage(assistantMessage)
+                }
+
+                _uiState.value = _uiState.value.copy(isLoading = false)
+            }.onFailure { err ->
+                // Save voice message even on error
+                val voiceMessage = MessageEntity(
+                    id = UUID.randomUUID().toString(),
+                    sessionId = currentAgentId,
+                    content = "🎤 Voice message (${duration}s)",
+                    role = MessageRole.USER.name,
+                    timestamp = System.currentTimeMillis(),
+                    isVoice = true,
+                    audioUrl = audioFile.absolutePath,
+                    audioDuration = duration
+                )
+                messageDao.insertMessage(voiceMessage)
+
+                _uiState.value = _uiState.value.copy(
+                    isLoading = false,
+                    error = err.message ?: "Voice chat failed"
+                )
+            }
         }
     }
 
