@@ -150,7 +150,8 @@ fun ChatScreen(
                                         message = message,
                                         isPlaying = (playingState as? VoiceMessagePlayer.PlayingState.Playing)?.messageId == message.id,
                                         onPlay = { viewModel.playVoiceMessage(message.id, message.audioUrl) },
-                                        onStop = { viewModel.stopVoicePlayback() }
+                                        onStop = { viewModel.stopVoicePlayback() },
+                                        showTranscript = message.role == MessageRole.ASSISTANT
                                     )
                                 } else {
                                     MessageBubble(message = message)
@@ -406,7 +407,8 @@ fun ChatInputBar(
 
 @Composable
 fun VoiceMessageBubble(
-    message: Message, isPlaying: Boolean, onPlay: () -> Unit, onStop: () -> Unit
+    message: Message, isPlaying: Boolean, onPlay: () -> Unit, onStop: () -> Unit,
+    showTranscript: Boolean = false
 ) {
     val isUser = message.role == MessageRole.USER
     val alignment = if (isUser) Alignment.CenterEnd else Alignment.CenterStart
@@ -452,6 +454,15 @@ fun VoiceMessageBubble(
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text(text = "${message.audioDuration}\"", style = MaterialTheme.typography.labelSmall, color = contentColor.copy(alpha = 0.7f))
                     Text(text = formatTime(message.timestamp), style = MaterialTheme.typography.labelSmall, color = contentColor.copy(alpha = 0.6f))
+                }
+                if (showTranscript && message.content.isNotBlank() && !message.content.startsWith("🎤")) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = message.content,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = contentColor.copy(alpha = 0.8f),
+                        maxLines = 3
+                    )
                 }
             }
         }

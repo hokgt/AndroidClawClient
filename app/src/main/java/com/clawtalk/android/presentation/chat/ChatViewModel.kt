@@ -10,8 +10,11 @@ import com.clawtalk.android.data.repository.SettingsRepository
 import com.clawtalk.android.domain.model.Message
 import com.clawtalk.android.domain.model.MessageRole
 import com.clawtalk.android.voice.AudioRecorder
+import com.clawtalk.android.voice.TtsEngine
 import com.clawtalk.android.voice.VoiceMessagePlayer
+import android.content.Context
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -22,12 +25,14 @@ import javax.inject.Inject
 
 @HiltViewModel
 class ChatViewModel @Inject constructor(
+    @ApplicationContext private val context: Context,
     private val messageDao: MessageDao,
     private val settingsRepository: SettingsRepository,
     private val openAiApiClient: OpenAiApiClient,
     private val voiceChatClient: VoiceChatClient,
     private val audioRecorder: AudioRecorder,
-    val voicePlayer: VoiceMessagePlayer
+    val voicePlayer: VoiceMessagePlayer,
+    private val ttsEngine: TtsEngine
 ) : ViewModel() {
 
     private val _messages = MutableStateFlow<List<Message>>(emptyList())
@@ -40,6 +45,15 @@ class ChatViewModel @Inject constructor(
     private var gatewayUrl: String = ""
     private var authToken: String = ""
     private val userId = UUID.randomUUID().toString()
+
+    override fun onCleared() {
+        super.onCleared()
+        ttsEngine.shutdown()
+    }
+
+    init {
+        ttsEngine.init()
+    }
 
     init {
         viewModelScope.launch {
@@ -141,16 +155,39 @@ class ChatViewModel @Inject constructor(
                     messageDao.insertMessage(updatedVoice)
                 }
 
-                // Save agent reply
+                // Save agent reply — synthesize TTS so it appears as voice bubble
                 if (vcResponse.agentReply.isNotBlank()) {
-                    val assistantMessage = MessageEntity(
-                        id = UUID.randomUUID().toString(),
-                        sessionId = currentAgentId,
-                        content = vcResponse.agentReply,
-                        role = MessageRole.ASSISTANT.name,
-                        timestamp = System.currentTimeMillis(),
-                        isVoice = false
-                    )
+                    val replyId = UUID.randomUUID().toString()
+                    val ttsFile = File(context.cacheDir, "tts_${replyId}.wav")
+
+                    val ttsSuccess = withContext(Dispatchers.IO) {
+                        ttsEngine.synthesize(vcResponse.agentReply, ttsFile)
+                    }
+
+                    val assistantMessage = if (ttsSuccess && ttsFile.exists()) {
+                        // Estimate duration from file size (16kHz 16-bit mono ≈ 32KB/s)
+                        val estimatedDuration = (ttsFile.length() / 32000).toInt().coerceAtLeast(1)
+                        MessageEntity(
+                            id = replyId,
+                            sessionId = currentAgentId,
+                            content = vcResponse.agentReply,
+                            role = MessageRole.ASSISTANT.name,
+                            timestamp = System.currentTimeMillis(),
+                            isVoice = true,
+                            audioUrl = ttsFile.absolutePath,
+                            audioDuration = estimatedDuration
+                        )
+                    } else {
+                        // Fallback to text if TTS fails
+                        MessageEntity(
+                            id = replyId,
+                            sessionId = currentAgentId,
+                            content = vcResponse.agentReply,
+                            role = MessageRole.ASSISTANT.name,
+                            timestamp = System.currentTimeMillis(),
+                            isVoice = false
+                        )
+                    }
                     messageDao.insertMessage(assistantMessage)
                 }
 
