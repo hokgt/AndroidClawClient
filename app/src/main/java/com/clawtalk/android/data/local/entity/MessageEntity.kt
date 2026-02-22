@@ -11,5 +11,6 @@ data class MessageEntity(
     val role: String,
     val timestamp: Long,
     val isVoice: Boolean = false,
-    val audioUrl: String? = null
+    val audioUrl: String? = null,
+    val audioDuration: Int = 0
 )

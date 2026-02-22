@@ -7,7 +7,8 @@ data class Message(
     val role: MessageRole,
     val timestamp: Long,
     val isVoice: Boolean = false,
-    val audioUrl: String? = null
+    val audioUrl: String? = null,
+    val audioDuration: Int = 0
 )
 
 enum class MessageRole {
