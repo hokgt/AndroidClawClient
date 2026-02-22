@@ -78,6 +78,7 @@ fun ChatScreen(
     // Speech recognizer
     val speechRecognizer = remember { SpeechRecognizer.createSpeechRecognizer(context) }
     var recognizedText by remember { mutableStateOf("") }
+    var pendingSend by remember { mutableStateOf(false) }
 
     DisposableEffect(Unit) {
         val listener = object : RecognitionListener {
@@ -95,14 +96,15 @@ fun ChatScreen(
                 if (!matches.isNullOrEmpty()) {
                     recognizedText = matches[0]
                 }
-                isHolding = false
-                recordingSeconds = 0
+                // Final result received — trigger send if not cancelled
+                pendingSend = true
             }
             override fun onPartialResults(partialResults: Bundle?) {
                 val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 if (!matches.isNullOrEmpty()) {
                     recognizedText = matches[0]
                 }
+                // Don't send on partial — just update preview
             }
             override fun onEvent(eventType: Int, params: Bundle?) {}
         }
@@ -121,12 +123,20 @@ fun ChatScreen(
         }
     }
 
-    // Send recognized text automatically
-    LaunchedEffect(recognizedText) {
-        if (recognizedText.isNotBlank() && !isCancelZone) {
+    // Send only when final result is ready and not cancelled
+    LaunchedEffect(pendingSend) {
+        if (pendingSend && recognizedText.isNotBlank() && !isCancelZone) {
             viewModel.onInputTextChange(recognizedText)
             viewModel.sendMessage()
             recognizedText = ""
+            pendingSend = false
+            isHolding = false
+            recordingSeconds = 0
+        } else if (pendingSend) {
+            recognizedText = ""
+            pendingSend = false
+            isHolding = false
+            recordingSeconds = 0
         }
     }
 
