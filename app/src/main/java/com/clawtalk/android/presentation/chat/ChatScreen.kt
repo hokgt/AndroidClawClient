@@ -1,12 +1,18 @@
 package com.clawtalk.android.presentation.chat
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Bundle
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -27,8 +33,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.clawtalk.android.R
@@ -47,12 +55,85 @@ fun ChatScreen(
     val messages by viewModel.messages.collectAsState()
     val uiState by viewModel.uiState.collectAsState()
     val listState = rememberLazyListState()
+    val context = LocalContext.current
+
+    // Voice mode toggle (like WeChat)
+    var isVoiceMode by remember { mutableStateOf(false) }
+    var isHolding by remember { mutableStateOf(false) }
+    var dragOffsetY by remember { mutableFloatStateOf(0f) }
+    var isCancelZone by remember { mutableStateOf(false) }
+    var recordingSeconds by remember { mutableIntStateOf(0) }
+
+    // Audio permission
+    var hasAudioPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
+        )
+    }
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> hasAudioPermission = granted }
+
+    // Speech recognizer
+    val speechRecognizer = remember { SpeechRecognizer.createSpeechRecognizer(context) }
+    var recognizedText by remember { mutableStateOf("") }
+
+    DisposableEffect(Unit) {
+        val listener = object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {}
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+            override fun onError(error: Int) {
+                isHolding = false
+                recordingSeconds = 0
+            }
+            override fun onResults(results: Bundle?) {
+                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                if (!matches.isNullOrEmpty()) {
+                    recognizedText = matches[0]
+                }
+                isHolding = false
+                recordingSeconds = 0
+            }
+            override fun onPartialResults(partialResults: Bundle?) {
+                val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                if (!matches.isNullOrEmpty()) {
+                    recognizedText = matches[0]
+                }
+            }
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        }
+        speechRecognizer.setRecognitionListener(listener)
+        onDispose { speechRecognizer.destroy() }
+    }
+
+    // Recording timer
+    LaunchedEffect(isHolding) {
+        if (isHolding) {
+            recordingSeconds = 0
+            while (isHolding) {
+                kotlinx.coroutines.delay(1000)
+                if (isHolding) recordingSeconds++
+            }
+        }
+    }
+
+    // Send recognized text automatically
+    LaunchedEffect(recognizedText) {
+        if (recognizedText.isNotBlank() && !isCancelZone) {
+            viewModel.onInputTextChange(recognizedText)
+            viewModel.sendMessage()
+            recognizedText = ""
+        }
+    }
 
     LaunchedEffect(agentId) {
         viewModel.setAgentId(agentId)
     }
 
-    // Auto-scroll to bottom when new messages arrive
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.size - 1)
@@ -71,7 +152,7 @@ fun ChatScreen(
                         AnimatedContent(
                             targetState = uiState.isLoading,
                             transitionSpec = {
-                                fadeIn(animationSpec = tween(200)) togetherWith fadeOut(animationSpec = tween(200))
+                                fadeIn(tween(200)) togetherWith fadeOut(tween(200))
                             },
                             label = "status"
                         ) { loading ->
@@ -96,71 +177,188 @@ fun ChatScreen(
             )
         }
     ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .imePadding()
-        ) {
-            // Messages
-            Box(modifier = Modifier.weight(1f)) {
-                if (messages.isEmpty()) {
-                    EmptyChat()
-                } else {
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(vertical = 8.dp),
-                        reverseLayout = false
-                    ) {
-                        items(
-                            items = messages,
-                            key = { it.id }
-                        ) { message ->
-                            MessageBubble(message = message)
-                        }
-
-                        // Typing indicator
-                        if (uiState.isLoading) {
-                            item {
-                                TypingIndicator()
-                            }
-                        }
-                    }
-                }
-
-                // Error snackbar
-                androidx.compose.animation.AnimatedVisibility(
-                    visible = uiState.error != null,
-                    enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
-                    exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
-                    modifier = Modifier.align(Alignment.BottomCenter)
-                ) {
-                    uiState.error?.let { error ->
-                        Snackbar(
-                            modifier = Modifier.padding(16.dp),
-                            action = {
-                                TextButton(onClick = { viewModel.clearError() }) {
-                                    Text("Dismiss")
-                                }
-                            }
+        Box(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .imePadding()
+            ) {
+                // Messages
+                Box(modifier = Modifier.weight(1f)) {
+                    if (messages.isEmpty()) {
+                        EmptyChat()
+                    } else {
+                        LazyColumn(
+                            state = listState,
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(vertical = 8.dp),
                         ) {
-                            Text(error)
+                            items(items = messages, key = { it.id }) { message ->
+                                MessageBubble(message = message)
+                            }
+                            if (uiState.isLoading) {
+                                item { TypingIndicator() }
+                            }
+                        }
+                    }
+
+                    // Error
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = uiState.error != null,
+                        enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+                        exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+                        modifier = Modifier.align(Alignment.BottomCenter)
+                    ) {
+                        uiState.error?.let { error ->
+                            Snackbar(
+                                modifier = Modifier.padding(16.dp),
+                                action = {
+                                    TextButton(onClick = { viewModel.clearError() }) {
+                                        Text("Dismiss")
+                                    }
+                                }
+                            ) { Text(error) }
                         }
                     }
                 }
+
+                // Input bar
+                ChatInputBar(
+                    value = uiState.inputText,
+                    onValueChange = viewModel::onInputTextChange,
+                    onSend = { viewModel.sendMessage() },
+                    isLoading = uiState.isLoading,
+                    isVoiceMode = isVoiceMode,
+                    onToggleVoiceMode = {
+                        if (!hasAudioPermission) {
+                            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        } else {
+                            isVoiceMode = !isVoiceMode
+                        }
+                    },
+                    isHolding = isHolding,
+                    isCancelZone = isCancelZone,
+                    recordingSeconds = recordingSeconds,
+                    onHoldStart = {
+                        if (hasAudioPermission) {
+                            isHolding = true
+                            isCancelZone = false
+                            dragOffsetY = 0f
+                            // Start speech recognition
+                            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                            }
+                            speechRecognizer.startListening(intent)
+                        }
+                    },
+                    onHoldEnd = {
+                        if (isCancelZone) {
+                            // Cancel
+                            speechRecognizer.cancel()
+                            recognizedText = ""
+                        } else {
+                            speechRecognizer.stopListening()
+                        }
+                        isHolding = false
+                        recordingSeconds = 0
+                    },
+                    onDragY = { dy ->
+                        dragOffsetY += dy
+                        isCancelZone = dragOffsetY < -100f
+                    }
+                )
             }
 
-            // Input bar
-            ChatInputBar(
-                value = uiState.inputText,
-                onValueChange = viewModel::onInputTextChange,
-                onSend = { viewModel.sendMessage() },
-                onVoiceStart = { viewModel.startVoiceRecording() },
-                onVoiceStop = { viewModel.stopVoiceRecording() },
-                isLoading = uiState.isLoading,
-                isRecording = uiState.isRecording
+            // Recording overlay (like WeChat)
+            if (isHolding) {
+                RecordingOverlay(
+                    seconds = recordingSeconds,
+                    isCancelZone = isCancelZone
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun RecordingOverlay(
+    seconds: Int,
+    isCancelZone: Boolean
+) {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        // Semi-transparent background
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.4f))
+        )
+
+        // Recording indicator
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // Pulsing mic icon
+            val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+            val pulseScale by infiniteTransition.animateFloat(
+                initialValue = 1f,
+                targetValue = 1.3f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(800),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "pulseScale"
             )
+
+            Box(
+                modifier = Modifier
+                    .size(80.dp)
+                    .scale(pulseScale)
+                    .clip(CircleShape)
+                    .background(
+                        if (isCancelZone) Color(0xFFE53935) else Color(0xFF0088CC)
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    painter = painterResource(id = R.drawable.ic_mic),
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(40.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Timer
+            Text(
+                text = String.format("%d:%02d", seconds / 60, seconds % 60),
+                color = Color.White,
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Cancel hint
+            AnimatedContent(
+                targetState = isCancelZone,
+                transitionSpec = {
+                    fadeIn(tween(150)) togetherWith fadeOut(tween(150))
+                },
+                label = "cancelHint"
+            ) { cancel ->
+                Text(
+                    text = if (cancel) "↑ Release to cancel" else "↑ Slide up to cancel",
+                    color = if (cancel) Color(0xFFFF5252) else Color.White.copy(alpha = 0.8f),
+                    fontSize = 14.sp
+                )
+            }
         }
     }
 }
@@ -168,32 +366,25 @@ fun ChatScreen(
 @Composable
 fun TypingIndicator() {
     val infiniteTransition = rememberInfiniteTransition(label = "typing")
-
     Row(
-        modifier = Modifier
-            .padding(horizontal = 16.dp, vertical = 4.dp),
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         repeat(3) { index ->
             val alpha by infiniteTransition.animateFloat(
-                initialValue = 0.3f,
-                targetValue = 1f,
+                initialValue = 0.3f, targetValue = 1f,
                 animationSpec = infiniteRepeatable(
                     animation = tween(600),
                     repeatMode = RepeatMode.Reverse,
                     initialStartOffset = StartOffset(index * 200)
-                ),
-                label = "dot_$index"
+                ), label = "dot_$index"
             )
-
             Box(
                 modifier = Modifier
                     .size(8.dp)
                     .clip(CircleShape)
-                    .background(
-                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha)
-                    )
+                    .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha))
             )
         }
     }
@@ -203,27 +394,14 @@ fun TypingIndicator() {
 fun MessageBubble(message: Message) {
     val isUser = message.role == MessageRole.USER
     val alignment = if (isUser) Alignment.CenterEnd else Alignment.CenterStart
-    val bubbleColor = if (isUser) {
-        MaterialTheme.colorScheme.primary
-    } else {
-        MaterialTheme.colorScheme.surfaceVariant
-    }
-    val textColor = if (isUser) {
-        MaterialTheme.colorScheme.onPrimary
-    } else {
-        MaterialTheme.colorScheme.onSurfaceVariant
-    }
+    val bubbleColor = if (isUser) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+    val textColor = if (isUser) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 8.dp, vertical = 2.dp)
-            .animateContentSize(
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessLow
-                )
-            ),
+            .animateContentSize(spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow)),
         contentAlignment = alignment
     ) {
         Column(
@@ -231,8 +409,7 @@ fun MessageBubble(message: Message) {
                 .widthIn(max = 300.dp)
                 .clip(
                     RoundedCornerShape(
-                        topStart = 16.dp,
-                        topEnd = 16.dp,
+                        topStart = 16.dp, topEnd = 16.dp,
                         bottomStart = if (isUser) 16.dp else 4.dp,
                         bottomEnd = if (isUser) 4.dp else 16.dp
                     )
@@ -240,11 +417,7 @@ fun MessageBubble(message: Message) {
                 .background(bubbleColor)
                 .padding(horizontal = 12.dp, vertical = 8.dp)
         ) {
-            Text(
-                text = message.content,
-                color = textColor,
-                style = MaterialTheme.typography.bodyMedium
-            )
+            Text(text = message.content, color = textColor, style = MaterialTheme.typography.bodyMedium)
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = formatTime(message.timestamp),
@@ -261,34 +434,16 @@ fun ChatInputBar(
     value: String,
     onValueChange: (String) -> Unit,
     onSend: () -> Unit,
-    onVoiceStart: () -> Unit,
-    onVoiceStop: () -> Unit,
     isLoading: Boolean,
-    isRecording: Boolean
+    isVoiceMode: Boolean,
+    onToggleVoiceMode: () -> Unit,
+    isHolding: Boolean,
+    isCancelZone: Boolean,
+    recordingSeconds: Int,
+    onHoldStart: () -> Unit,
+    onHoldEnd: () -> Unit,
+    onDragY: (Float) -> Unit
 ) {
-    val context = LocalContext.current
-    var hasAudioPermission by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-                PackageManager.PERMISSION_GRANTED
-        )
-    }
-
-    val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        hasAudioPermission = granted
-    }
-
-    // Mic button animation
-    val micScale by animateFloatAsState(
-        targetValue = if (isRecording) 1.4f else 1f,
-        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
-        label = "micScale"
-    )
-
-    val showSendButton = value.isNotBlank()
-
     Surface(
         tonalElevation = 3.dp,
         color = MaterialTheme.colorScheme.surface,
@@ -298,35 +453,97 @@ fun ChatInputBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.Bottom
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            // Text input
-            OutlinedTextField(
-                value = value,
-                onValueChange = onValueChange,
-                modifier = Modifier.weight(1f),
-                placeholder = { Text("Message") },
-                maxLines = 4,
-                shape = RoundedCornerShape(24.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+            // Voice/Keyboard toggle button (like WeChat)
+            IconButton(onClick = onToggleVoiceMode) {
+                AnimatedContent(
+                    targetState = isVoiceMode,
+                    transitionSpec = { scaleIn(tween(150)) + fadeIn(tween(150)) togetherWith scaleOut(tween(150)) + fadeOut(tween(150)) },
+                    label = "modeToggle"
+                ) { voice ->
+                    if (voice) {
+                        Icon(
+                            painter = painterResource(id = R.drawable.ic_keyboard),
+                            contentDescription = "Switch to keyboard",
+                            modifier = Modifier.size(24.dp)
+                        )
+                    } else {
+                        Icon(
+                            painter = painterResource(id = R.drawable.ic_mic),
+                            contentDescription = "Switch to voice",
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                }
+            }
+
+            if (isVoiceMode) {
+                // Hold to Talk button (WeChat style)
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(
+                            if (isHolding) {
+                                if (isCancelZone)
+                                    MaterialTheme.colorScheme.error.copy(alpha = 0.2f)
+                                else
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                            } else {
+                                MaterialTheme.colorScheme.surfaceVariant
+                            }
+                        )
+                        .pointerInput(Unit) {
+                            detectTapGestures(
+                                onPress = {
+                                    onHoldStart()
+                                    tryAwaitRelease()
+                                    onHoldEnd()
+                                }
+                            )
+                        }
+                        .pointerInput(Unit) {
+                            detectDragGestures { _, dragAmount ->
+                                onDragY(dragAmount.y)
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (isHolding) {
+                            if (isCancelZone) "Release to cancel" else "Release to send"
+                        } else {
+                            "Hold to Talk"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = if (isHolding && isCancelZone)
+                            MaterialTheme.colorScheme.error
+                        else
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else {
+                // Text input
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text("Message") },
+                    maxLines = 4,
+                    shape = RoundedCornerShape(24.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+                    )
                 )
-            )
 
-            Spacer(modifier = Modifier.width(6.dp))
+                Spacer(modifier = Modifier.width(6.dp))
 
-            // Send or Mic button with crossfade
-            AnimatedContent(
-                targetState = showSendButton,
-                transitionSpec = {
-                    scaleIn(animationSpec = tween(150)) + fadeIn(animationSpec = tween(150)) togetherWith
-                        scaleOut(animationSpec = tween(150)) + fadeOut(animationSpec = tween(150))
-                },
-                label = "inputAction"
-            ) { showSend ->
-                if (showSend) {
-                    // Send button
+                // Send button
+                if (value.isNotBlank()) {
                     FilledIconButton(
                         onClick = onSend,
                         enabled = !isLoading,
@@ -342,46 +559,8 @@ fun ChatInputBar(
                                 color = MaterialTheme.colorScheme.onPrimary
                             )
                         } else {
-                            Icon(
-                                Icons.Default.Send,
-                                contentDescription = "Send",
-                                tint = MaterialTheme.colorScheme.onPrimary
-                            )
+                            Icon(Icons.Default.Send, contentDescription = "Send", tint = MaterialTheme.colorScheme.onPrimary)
                         }
-                    }
-                } else {
-                    // Mic button — hold to record
-                    FilledIconButton(
-                        onClick = { /* handled by pointerInput */ },
-                        modifier = Modifier
-                            .size(48.dp)
-                            .scale(micScale)
-                            .pointerInput(Unit) {
-                                detectTapGestures(
-                                    onPress = {
-                                        if (!hasAudioPermission) {
-                                            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                            return@detectTapGestures
-                                        }
-                                        onVoiceStart()
-                                        tryAwaitRelease()
-                                        onVoiceStop()
-                                    }
-                                )
-                            },
-                        colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = if (isRecording)
-                                Color(0xFFE53935)
-                            else
-                                MaterialTheme.colorScheme.secondary
-                        )
-                    ) {
-                        Icon(
-                            painter = painterResource(id = R.drawable.ic_mic),
-                            contentDescription = if (isRecording) "Recording..." else "Hold to record",
-                            tint = Color.White,
-                            modifier = Modifier.size(24.dp)
-                        )
                     }
                 }
             }
@@ -396,13 +575,10 @@ fun EmptyChat() {
         contentAlignment = Alignment.Center
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                text = "🎙️",
-                style = MaterialTheme.typography.displayLarge
-            )
+            Text(text = "🎙️", style = MaterialTheme.typography.displayLarge)
             Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "Hold the mic to talk\nor type a message",
+                text = "Tap 🎤 to switch to voice\nor type a message",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
@@ -412,6 +588,5 @@ fun EmptyChat() {
 }
 
 private fun formatTime(timestamp: Long): String {
-    val date = Date(timestamp)
-    return SimpleDateFormat("HH:mm", Locale.getDefault()).format(date)
+    return SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp))
 }
