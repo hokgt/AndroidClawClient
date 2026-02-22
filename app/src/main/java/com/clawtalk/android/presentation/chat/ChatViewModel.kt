@@ -38,6 +38,9 @@ class ChatViewModel @Inject constructor(
     private var authToken: String = ""
     private val userId = UUID.randomUUID().toString()
 
+    // Store transcription from SpeechRecognizer running in UI layer
+    private var pendingTranscription: String = ""
+
     init {
         viewModelScope.launch {
             settingsRepository.gatewayUrl.collect { url -> gatewayUrl = url }
@@ -72,20 +75,26 @@ class ChatViewModel @Inject constructor(
     fun sendMessage() {
         val content = _uiState.value.inputText.trim()
         if (content.isBlank() || currentAgentId.isBlank()) return
-        doSendMessage(content, isVoice = false, audioPath = null, audioDuration = 0)
+        doSendTextMessage(content)
     }
 
     fun startVoiceRecording() {
+        pendingTranscription = ""
         val file = audioRecorder.startRecording()
         if (file != null) {
             _uiState.value = _uiState.value.copy(isRecording = true)
         }
     }
 
+    fun updateTranscription(text: String) {
+        pendingTranscription = text
+    }
+
     fun stopVoiceRecording(cancelled: Boolean) {
         if (cancelled) {
             audioRecorder.cancelRecording()
             _uiState.value = _uiState.value.copy(isRecording = false)
+            pendingTranscription = ""
             return
         }
 
@@ -93,20 +102,31 @@ class ChatViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(isRecording = false)
 
         if (result != null && result.durationSeconds > 0) {
-            // Save voice message and send transcription request to AI
-            doSendVoiceMessage(result.file.absolutePath, result.durationSeconds)
+            doSendVoiceMessage(
+                audioPath = result.file.absolutePath,
+                duration = result.durationSeconds,
+                transcription = pendingTranscription
+            )
         }
+        pendingTranscription = ""
     }
 
-    private fun doSendVoiceMessage(audioPath: String, duration: Int) {
+    private fun doSendVoiceMessage(audioPath: String, duration: Int, transcription: String) {
         if (currentAgentId.isBlank()) return
 
         viewModelScope.launch {
+            // Display text: show transcription if available, otherwise generic label
+            val displayText = if (transcription.isNotBlank()) {
+                "🎤 $transcription"
+            } else {
+                "🎤 Voice message (${duration}s)"
+            }
+
             // Save voice message to DB (shown as voice bubble)
             val voiceMessage = MessageEntity(
                 id = UUID.randomUUID().toString(),
                 sessionId = currentAgentId,
-                content = "🎤 Voice message (${duration}s)",
+                content = displayText,
                 role = MessageRole.USER.name,
                 timestamp = System.currentTimeMillis(),
                 isVoice = true,
@@ -116,11 +136,15 @@ class ChatViewModel @Inject constructor(
             messageDao.insertMessage(voiceMessage)
             _uiState.value = _uiState.value.copy(isLoading = true, error = null)
 
-            // Send a text prompt to the AI telling it we sent a voice message
-            // In future, we'll send actual audio to server for STT
+            // Send actual transcription to AI (or fallback message)
+            val textToSend = if (transcription.isNotBlank()) {
+                transcription
+            } else {
+                "[User sent a ${duration}s voice message but transcription failed. Ask them to repeat or type it.]"
+            }
+
             val history = buildMessageHistory()
-            val voicePrompt = "[Voice message from user, ${duration} seconds long. Please acknowledge and respond.]"
-            val messages = history + OpenAiApiClient.ChatMessage(role = "user", content = voicePrompt)
+            val messages = history + OpenAiApiClient.ChatMessage(role = "user", content = textToSend)
 
             val result = withContext(Dispatchers.IO) {
                 openAiApiClient.sendMessage(
@@ -136,7 +160,7 @@ class ChatViewModel @Inject constructor(
         }
     }
 
-    private fun doSendMessage(content: String, isVoice: Boolean, audioPath: String?, audioDuration: Int) {
+    private fun doSendTextMessage(content: String) {
         if (currentAgentId.isBlank()) return
 
         viewModelScope.launch {
@@ -146,9 +170,7 @@ class ChatViewModel @Inject constructor(
                 content = content,
                 role = MessageRole.USER.name,
                 timestamp = System.currentTimeMillis(),
-                isVoice = isVoice,
-                audioUrl = audioPath,
-                audioDuration = audioDuration
+                isVoice = false
             )
             messageDao.insertMessage(userMessage)
             _uiState.value = _uiState.value.copy(inputText = "", isLoading = true, error = null)
@@ -170,18 +192,21 @@ class ChatViewModel @Inject constructor(
     }
 
     private fun buildMessageHistory(): List<OpenAiApiClient.ChatMessage> {
-        return _messages.value
-            .filter { !it.isVoice } // Only send text messages as history
-            .map { msg ->
-                OpenAiApiClient.ChatMessage(
-                    role = when (msg.role) {
-                        MessageRole.USER -> "user"
-                        MessageRole.ASSISTANT -> "assistant"
-                        else -> "system"
-                    },
-                    content = msg.content
-                )
+        return _messages.value.map { msg ->
+            val text = if (msg.isVoice && msg.content.startsWith("🎤 ")) {
+                msg.content.removePrefix("🎤 ")
+            } else {
+                msg.content
             }
+            OpenAiApiClient.ChatMessage(
+                role = when (msg.role) {
+                    MessageRole.USER -> "user"
+                    MessageRole.ASSISTANT -> "assistant"
+                    else -> "system"
+                },
+                content = text
+            )
+        }
     }
 
     private suspend fun handleAiResponse(result: Result<String>) {
@@ -214,14 +239,9 @@ class ChatViewModel @Inject constructor(
 
     private fun MessageEntity.toMessage(): Message {
         return Message(
-            id = id,
-            sessionId = sessionId,
-            content = content,
-            role = MessageRole.valueOf(role),
-            timestamp = timestamp,
-            isVoice = isVoice,
-            audioUrl = audioUrl,
-            audioDuration = audioDuration
+            id = id, sessionId = sessionId, content = content,
+            role = MessageRole.valueOf(role), timestamp = timestamp,
+            isVoice = isVoice, audioUrl = audioUrl, audioDuration = audioDuration
         )
     }
 

@@ -1,7 +1,12 @@
 package com.clawtalk.android.presentation.chat
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Bundle
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
@@ -70,6 +75,35 @@ fun ChatScreen(
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted -> hasAudioPermission = granted }
+
+    // SpeechRecognizer for parallel transcription
+    val speechRecognizer = remember { SpeechRecognizer.createSpeechRecognizer(context) }
+
+    DisposableEffect(Unit) {
+        val listener = object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {}
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+            override fun onError(error: Int) {}
+            override fun onResults(results: Bundle?) {
+                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                if (!matches.isNullOrEmpty()) {
+                    viewModel.updateTranscription(matches[0])
+                }
+            }
+            override fun onPartialResults(partialResults: Bundle?) {
+                val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                if (!matches.isNullOrEmpty()) {
+                    viewModel.updateTranscription(matches[0])
+                }
+            }
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        }
+        speechRecognizer.setRecognitionListener(listener)
+        onDispose { speechRecognizer.destroy() }
+    }
 
     // Recording timer
     LaunchedEffect(isHolding) {
@@ -192,9 +226,19 @@ fun ChatScreen(
                             isCancelZone = false
                             dragOffsetY = 0f
                             viewModel.startVoiceRecording()
+                            // Start speech recognition in parallel for transcription
+                            try {
+                                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                                    putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                                    putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                                }
+                                speechRecognizer.startListening(intent)
+                            } catch (_: Exception) {}
                         }
                     },
                     onHoldEnd = {
+                        try { speechRecognizer.stopListening() } catch (_: Exception) {}
                         viewModel.stopVoiceRecording(cancelled = isCancelZone)
                         isHolding = false
                         recordingSeconds = 0
