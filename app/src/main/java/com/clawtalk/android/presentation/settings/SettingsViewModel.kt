@@ -5,10 +5,12 @@ import androidx.lifecycle.viewModelScope
 import com.clawtalk.android.data.remote.OpenAiApiClient
 import com.clawtalk.android.data.repository.SettingsRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 @HiltViewModel
@@ -48,10 +50,12 @@ class SettingsViewModel @Inject constructor(
     fun testConnection() {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isTesting = true, connectionResult = null)
-            val result = openAiApiClient.testConnection(
-                gatewayUrl = _uiState.value.gatewayUrl,
-                authToken = _uiState.value.authToken
-            )
+            val result = withContext(Dispatchers.IO) {
+                openAiApiClient.testConnection(
+                    gatewayUrl = _uiState.value.gatewayUrl,
+                    authToken = _uiState.value.authToken
+                )
+            }
             _uiState.value = _uiState.value.copy(isTesting = false, connectionResult = result)
         }
     }
